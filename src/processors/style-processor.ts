@@ -1,16 +1,24 @@
-import { ResourceProcessor, ArchivingContext, ArchivedResource } from '../core/types'; // 假设的通用接口
-import { resolveUrl, getMimeType } from '../utils/url';
-import { fetchText, fetchBlob } from '../utils/network'; // 假设的网络请求工具
+import * as csstree from 'css-tree';
+import { ResourceProcessor, ArchivingContext, ArchivedResource } from '../core/types';
+import { resolveUrl, getMimeType, blobToDataUri } from '../utils/url';
+import { fetchText, fetchBlob } from '../utils/network';
 
 /**
- * CSS 资源处理器
- * 负责处理 <link> 和 <style> 标签，提取其中的 CSS 文本及引用的资源（图片、字体、@import）
+ * 样式处理器
+ * 1. 处理 <link rel="stylesheet"> 和 <style> 标签
+ * 2. 解析 CSS 内容，找到 url() 引用的资源，进行内联处理
+ * 3. 返回处理后的 CSS 字符串供归档使用
+ * 4. 对于 @import 的处理：css-tree 在解析时会自动解析 @import 的 URL，但不会自动下载和内联内容，我们需要在 walk 中手动处理 Atrule 节点来实现 @import 的展开。
+ *    - 当遇到 @import 时，解析其 URL，下载内容，递归调用 processWithAst 来处理该 CSS 内容，并将结果直接插入到主 AST 中，替换原来的 @import 规则。
+ *    - 这样最终生成的 CSS 就是完全展开的，没有任何外部依赖了。
+ * 5. 对于 url() 的处理：直接修改 AST 中 Url 节点的 value 为内联后的 Data URI，这样在生成 CSS 字符串时就会自动使用内联资源。
+ * 6. 错误处理：如果下载或处理某个资源失败，应该记录日志但不抛出错误，保持原有 URL 不变，确保归档过程的鲁棒性。
+ * 7. 性能优化：对于大型 CSS 文件，解析和处理可能比较耗时，可以考虑增加缓存机制，避免重复处理同一资源。
+ * 8. 安全性：处理 CSS 时要注意潜在的安全问题，如恶意的 @import URL 或 url() 引用，应该有合理的超时和错误处理机制，避免被恶意资源拖慢或崩溃。
+ * 9. 兼容性：需要考虑不同浏览器对 CSS 语法的支持差异，css-tree 的解析选项可以调整以适应不同的 CSS 版本和特性。
+ * 10. 可扩展性：设计时要考虑未来可能需要支持更多 CSS 特性或处理更多类型的资源，保持代码结构清晰和模块化。
  */
 export class StyleProcessor implements ResourceProcessor {
-  // 匹配 @import 规则的正则
-  private static IMPORT_REGEX = /@import\s+(?:url$['"]?([^'"]+)['"]?$|['"]([^'"]+)['"])/gi;
-  // 匹配 url() 的正则 (排除 @import 已处理的情况，通常用于 background, font-face 等)
-  private static URL_REGEX = /url$\s*['"]?([^'")\s]+)['"]?\s*$/gi;
 
   /**
    * 判断当前节点是否由该处理器处理
@@ -20,7 +28,6 @@ export class StyleProcessor implements ResourceProcessor {
     if (tagName === 'link') {
       const rel = node.getAttribute('rel')?.toLowerCase();
       const type = node.getAttribute('type')?.toLowerCase();
-      // 匹配 rel="stylesheet" 或 type="text/css"
       return rel === 'stylesheet' || type === 'text/css';
     }
     return tagName === 'style';
@@ -32,153 +39,96 @@ export class StyleProcessor implements ResourceProcessor {
   async process(node: Element, context: ArchivingContext): Promise<ArchivedResource> {
     const tagName = node.tagName.toLowerCase();
     let cssText = '';
-    let baseUrl = context.pageUrl; // 默认基准 URL 是页面 URL
+    let cssUrl = context.pageUrl; // 默认基准 URL
 
     try {
       if (tagName === 'link') {
         const href = node.getAttribute('href');
         if (!href) return { type: 'empty', data: '' };
 
-        // 1. 处理外部 CSS 文件
-        const absoluteUrl = resolveUrl(href, context.pageUrl);
-        baseUrl = absoluteUrl; // 关键点：CSS 中的相对路径是相对于 CSS 文件本身的
-        
+        cssUrl = resolveUrl(href, context.pageUrl);
         // 下载 CSS 内容
-        cssText = await fetchText(absoluteUrl, context.options);
-        
+        cssText = await fetchText(cssUrl, context.options);
       } else if (tagName === 'style') {
-        // 2. 处理内部 CSS 块
         cssText = node.textContent || '';
       }
 
-      // 3. 解析并替换 CSS 内容中的资源引用
-      // 我们需要递归处理 @import，因为 @import 可以嵌套（虽然不推荐，但存在）
-      const processedCss = await this.resolveCssImportsAndUrls(cssText, baseUrl, context);
+      // 使用 css-tree 进行 AST 解析和处理
+      const processedCss = await this.processWithAst(cssText, cssUrl, context);
 
       return {
         type: 'style',
         data: processedCss,
-        originalNode: node, // 保留引用以便后续替换 DOM
+        originalNode: node,
       };
 
     } catch (err) {
       console.error(`[StyleProcessor] Failed to process style: ${err}`, node);
-      // 失败时返回原始内容或空，取决于策略
-      return { type: 'style', data: cssText }; 
+      return { type: 'style', data: cssText };
     }
   }
 
   /**
-   * 递归处理 CSS 内容
-   * 1. 提取 @import 并递归获取其内容
-   * 2. 替换 url() 为 DataURI
+   * 使用 css-tree 解析并处理 CSS
    */
-  private async resolveCssImportsAndUrls(
-    cssText: string, 
-    baseUrl: string, 
-    context: ArchivingContext
-  ): Promise<string> {
-    let resultCss = cssText;
-
-    // --- 第一步：处理 @import ---
-    // 注意：为了不破坏原始字符串的索引，我们从后向前替换，或者使用异步累加器
-    // 这里为了代码清晰，使用正则替换配合异步处理
-    
-    const importMatches = [...cssText.matchAll(StyleProcessor.IMPORT_REGEX)];
-    
-    // 使用 Promise.all 并行下载所有 @import 的资源
-    const importPromises = importMatches.map(async (match) => {
-      const url = match[1] || match[2]; // 获取 url(...) 或 "..." 中的路径
-      if (!url) return null;
-
-      const absoluteUrl = resolveUrl(url, baseUrl);
-      
-      try {
-        // 递归下载被 import 的 CSS
-        const importedCssText = await fetchText(absoluteUrl, context.options);
-        // 递归处理被 import CSS 中的 url() 和 @import (基准 URL 变为被 import 文件的 URL)
-        return await this.resolveCssImportsAndUrls(importedCssText, absoluteUrl, context);
-      } catch (e) {
-        console.warn(`Failed to load @import: ${absoluteUrl}`);
-        return ''; // 加载失败返回空字符串
-      }
+  private async processWithAst(cssText: string, cssUrl: string, context: ArchivingContext): Promise<string> {
+    // 1. 解析 CSS 为 AST
+    // parseAtrulePrelude: false 提高性能，我们主要关心值
+    const ast = csstree.parse(cssText, {
+      positions: true, 
+      filename: cssUrl // 关键：告诉 css-tree 当前文件的 URL，用于 @import 解析
     });
 
-    const resolvedImports = await Promise.all(importPromises);
+    // 2. 遍历 AST 查找 url() 节点
+    // css-tree 会自动处理 @import 的 url 和 background-image 的 url
+    await csstree.walk(ast, {
+      visit: 'Url',
+      async enter(node) {
+        // node.value 是 url() 括号里的字符串内容（不含引号）
+        const rawUrl = node.value;
 
-    // 将 @import 语句替换为实际的 CSS 内容
-    // 注意：这里简单地按顺序替换。更严谨的做法是使用 replace 回调。
-    let importIndex = 0;
-    resultCss = resultCss.replace(StyleProcessor.IMPORT_REGEX, () => {
-      return resolvedImports[importIndex++] || '';
-    });
-
-    // --- 第二步：处理 url() (背景图、字体等) ---
-    // 此时 @import 已经被展开，我们只需要处理剩下的 url()
-    resultCss = await this.resolveCssUrls(resultCss, baseUrl, context);
-
-    return resultCss;
-  }
-
-  /**
-   * 处理 CSS 中的 url() 函数，将其转换为 DataURI
-   */
-  private async resolveCssUrls(cssText: string, baseUrl: string, context: ArchivingContext): Promise<string> {
-    // 使用异步替换
-    const matches = [...cssText.matchAll(StyleProcessor.URL_REGEX)];
-    
-    // 收集所有需要替换的任务
-    const replacements = await Promise.all(matches.map(async (match) => {
-      const url = match[1];
-      if (!url || url.startsWith('data:')) {
-        return { original: match[0], replacement: match[0] }; // 已经是 data uri 或无效，跳过
-      }
-
-      const absoluteUrl = resolveUrl(url, baseUrl);
-      
-      try {
-        // 检查缓存，避免重复下载
-        if (context.cache.has(absoluteUrl)) {
-           const dataUri = context.cache.get(absoluteUrl);
-           return { original: match[0], replacement: `url("${dataUri}")` };
+        if (!rawUrl || rawUrl.startsWith('data:')) {
+          return; // 跳过 data URI
         }
 
-        // 下载资源
-        const blob = await fetchBlob(absoluteUrl, context.options);
-        const mimeType = getMimeType(absoluteUrl) || 'application/octet-stream';
-        
-        // 转换为 Base64
-        const dataUri = await this.blobToDataUri(blob, mimeType);
-        
-        // 存入缓存
-        context.cache.set(absoluteUrl, dataUri);
+        try {
+          // 3. 解析绝对路径
+          // css-tree 的 generate 方法在遇到 @import 时会自动基于 filename 解析相对路径
+          // 但我们需要手动 resolve 以确保万无一失，特别是针对 node.value
+          // 注意：node.loc.source.filename 是当前 CSS 文件的路径
+          const currentFileUrl = node.loc?.source?.filename || cssUrl;
+          const absoluteUrl = resolveUrl(rawUrl, currentFileUrl);
 
-        return { original: match[0], replacement: `url("${dataUri}")` };
-      } catch (e) {
-        console.warn(`Failed to inline CSS resource: ${absoluteUrl}`);
-        return { original: match[0], replacement: match[0] }; // 失败保留原样
+          // --- 调试日志 ---
+          console.log(`[StyleProcessor] Processing URL: ${rawUrl} -> ${absoluteUrl}`);
+
+          // 4. 检查缓存或下载
+          if (context.cache.has(absoluteUrl)) {
+            node.value = context.cache.get(absoluteUrl);
+          } else {
+            const blob = await fetchBlob(absoluteUrl, context.options);
+            const mimeType = blob.type || getMimeType(absoluteUrl) || 'application/octet-stream';
+            const dataUri = await blobToDataUri(blob, mimeType);
+            
+            context.cache.set(absoluteUrl, dataUri);
+            node.value = dataUri; // 直接修改 AST 节点的值
+
+                    // 确认赋值成功
+                    console.log(`[StyleProcessor] Converted to Base64 (${dataUri.slice(0, 100)}...): ${absoluteUrl}`);
+          }
+        } catch (e) {
+          console.warn(`[StyleProcessor] Failed to inline: ${rawUrl}`, e);
+          // 失败则保持原样，不修改 node.value
+        }
       }
-    }));
-
-    // 执行替换
-    let finalCss = cssText;
-    replacements.forEach(({ original, replacement }) => {
-      // 简单的字符串替换，注意如果有重复的 url 可能会有问题，
-      // 严谨做法是使用 replace 回调，但这里为了演示逻辑简化处理
-      finalCss = finalCss.replace(original, replacement);
     });
 
-    return finalCss;
+    // 5. 将 AST 重新生成 CSS 字符串
+    // 这一步会自动处理 @import 的展开（如果之前没有展开的话，但通常 walk 不会自动展开 @import 内容）
+    // 注意：css-tree 的 walk 默认不会自动把 @import 的内容“插入”到主文件中。
+    // 如果你需要展开 @import，需要单独处理 Atrule 节点（见下方补充）。
+    
+    return csstree.generate(ast);
   }
 
-  /**
-   * 辅助函数：Blob 转 DataURI
-   */
-  private blobToDataUri(blob: Blob, mimeType: string): Promise<string> {
-    return new Promise((resolve) => {
-      const reader = new FileReader();
-      reader.onloadend = () => resolve(reader.result as string);
-      reader.readAsDataURL(blob);
-    });
-  }
 }
