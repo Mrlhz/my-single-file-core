@@ -50,6 +50,7 @@ export class StyleProcessor implements ResourceProcessor {
         // 下载 CSS 内容
         cssText = await fetchText(cssUrl, context.options);
       } else if (tagName === 'style') {
+        // 处理 <style> 标签
         cssText = node.textContent || '';
       }
 
@@ -79,55 +80,40 @@ export class StyleProcessor implements ResourceProcessor {
       filename: cssUrl // 关键：告诉 css-tree 当前文件的 URL，用于 @import 解析
     });
 
-    // 2. 遍历 AST 查找 url() 节点
-    // css-tree 会自动处理 @import 的 url 和 background-image 的 url
-    await csstree.walk(ast, {
+    // 1. 收集所有 URL
+    const urlNodes: csstree.Url[] = [];
+
+    csstree.walk(ast, {
       visit: 'Url',
-      async enter(node) {
+      enter(node) {
         // node.value 是 url() 括号里的字符串内容（不含引号）
         const rawUrl = node.value;
-
-        if (!rawUrl || rawUrl.startsWith('data:')) {
-          return; // 跳过 data URI
-        }
-
-        try {
-          // 3. 解析绝对路径
-          // css-tree 的 generate 方法在遇到 @import 时会自动基于 filename 解析相对路径
-          // 但我们需要手动 resolve 以确保万无一失，特别是针对 node.value
-          // 注意：node.loc.source.filename 是当前 CSS 文件的路径
-          const currentFileUrl = node.loc?.source?.filename || cssUrl;
-          const absoluteUrl = resolveUrl(rawUrl, currentFileUrl);
-
-          // --- 调试日志 ---
-          console.log(`[StyleProcessor] Processing URL: ${rawUrl} -> ${absoluteUrl}`);
-
-          // 4. 检查缓存或下载
-          if (context.cache.has(absoluteUrl)) {
-            node.value = context.cache.get(absoluteUrl);
-          } else {
-            const blob = await fetchBlob(absoluteUrl, context.options);
-            const mimeType = blob.type || getMimeType(absoluteUrl) || 'application/octet-stream';
-            const dataUri = await blobToDataUri(blob, mimeType);
-            
-            context.cache.set(absoluteUrl, dataUri);
-            node.value = dataUri; // 直接修改 AST 节点的值
-
-                    // 确认赋值成功
-                    console.log(`[StyleProcessor] Converted to Base64 (${dataUri.slice(0, 100)}...): ${absoluteUrl}`);
-          }
-        } catch (e) {
-          console.warn(`[StyleProcessor] Failed to inline: ${rawUrl}`, e);
-          // 失败则保持原样，不修改 node.value
+        if (rawUrl && !rawUrl.startsWith('data:')) {
+          urlNodes.push(node);
         }
       }
     });
 
-    // 5. 将 AST 重新生成 CSS 字符串
-    // 这一步会自动处理 @import 的展开（如果之前没有展开的话，但通常 walk 不会自动展开 @import 内容）
-    // 注意：css-tree 的 walk 默认不会自动把 @import 的内容“插入”到主文件中。
-    // 如果你需要展开 @import，需要单独处理 Atrule 节点（见下方补充）。
-    
+    // 2. 并发下载所有资源 (异步)
+    await Promise.all([...urlNodes].map(async (node) => {
+      const absoluteUrl = resolveUrl(node.value, cssUrl);
+      try {
+        if (context.cache.has(absoluteUrl)) {
+          node.value = context.cache.get(absoluteUrl);
+        } else {
+          const blob = await fetchBlob(absoluteUrl, context.options);
+          const mimeType = blob.type || getMimeType(absoluteUrl);
+          const dataUri = await blobToDataUri(blob, mimeType || 'application/octet-stream');
+
+          context.cache.set(absoluteUrl, dataUri);
+          node.value = dataUri; // 修改 AST 节点
+        }
+      } catch (e) {
+        console.warn(`Failed to fetch: ${node.value}`, e);
+      }
+    }));
+
+    // 3. 生成 CSS (此时所有 node.value 已更新)
     return csstree.generate(ast);
   }
 
