@@ -5,19 +5,35 @@ import { ResourceGraph } from './resource-graph';
 import type { ArchivingOptions, ArchivingContext, ArchivedResource } from '../models/options';
 import type { Resource } from '../models/resource';
 import { createResourceFromNode } from '../models/resource'; // 假设的工厂函数
+import { IDocPreprocessor } from './types';
 
 /**
  * 页面归档主类
  */
 export class PageArchiver {
+  // 预处理器列表
+  private preprocessors: IDocPreprocessor[] = [];
   private processors: ResourceProcessor[] = [];
   private options: ArchivingOptions;
+  private graph: ResourceGraph;
 
   constructor(options: Partial<ArchivingOptions> = {}) {
     this.options = {
       ...this.getDefaultOptions(),
       ...options
     };
+
+    this.graph = new ResourceGraph();
+  }
+
+  // 注册文档预处理器（策略模式）
+  registerPreprocessor(preprocessor: IDocPreprocessor): void {
+    this.preprocessors.push(preprocessor);
+  }
+
+  // 批量注册预处理器
+  registerPreprocessors(preprocessors: IDocPreprocessor[]): void {
+    this.preprocessors.push(...preprocessors);
   }
 
   /**
@@ -38,30 +54,39 @@ export class PageArchiver {
    * 主归档入口
    */
   async archive(doc: Document | HTMLElement): Promise<string> {
+    // 构建归档上下文
     const context: ArchivingContext = {
       pageUrl: doc instanceof Document ? doc.location?.href || '' : window.location.href,
       options: this.options,
       cache: new Map<string, string>() // URL -> DataURI 缓存
     };
 
-    // 1. 收集所有待处理节点
-    const nodesToProcess = this.collectNodes(doc);
+    // 1. 克隆文档 (在此处克隆，确保原始页面不受影响)
+    // 注意：如果是跨域 iframe 内容，cloneNode 可能无法复制某些属性，需注意
+    const workingDoc = doc instanceof Document ? doc.cloneNode(true) as Document : doc.cloneNode(true) as HTMLElement;
 
-    // 2. 构建资源图
-    const graph = new ResourceGraph();
+    // 2. 【关键步骤】执行预处理任务 (清洗、提取元数据)
+    await this.runPreprocessors(workingDoc, context);
 
-    // 3. 并行处理节点
+    // 3. 收集所有待处理节点
+    const nodesToProcess = this.collectNodes(workingDoc);
+
+    // 4. 构建资源图
+    // const graph = new ResourceGraph();
+    // context.resourceGraph = graph; // 让处理器也能访问图结构，便于资源间关联（如 CSS 引用的图片）
+
+    // 5. 并行处理节点 (图片、CSS、字体等)
     const processingPromises = nodesToProcess.map(async (node) => {
       const processor = this.findProcessorFor(node);
       if (!processor) {
-        console.warn('[PageArchiver] No processor found for node:', node);
+        // console.warn('[PageArchiver] No processor found for node:', node);
         return null;
       }
 
       try {
         const archived = await processor.process(node, context);
         const resource = createResourceFromNode(node, archived);
-        graph.addResource(resource);
+        this.graph.addResource(resource);
         return resource;
       } catch (err) {
         console.error('[PageArchiver] Processor failed:', err, node);
@@ -71,8 +96,8 @@ export class PageArchiver {
 
     await Promise.all(processingPromises);
 
-    // 4. 序列化为单文件 HTML
-    const serialized = this.serialize(doc, graph, context);
+    // 6. 序列化为单文件 HTML
+    const serialized = this.serialize(workingDoc, this.graph, context);
     return serialized;
   }
 
@@ -156,5 +181,26 @@ export class PageArchiver {
       maxResourceSize: 10 * 1024 * 1024, // 10MB
       timeout: 30000
     };
+  }
+
+  /**
+   * 执行所有预处理器
+   */
+  private async runPreprocessors(doc: Document, context: ArchivingContext): Promise<void> {
+    // 按注册顺序串行执行，因为某些预处理器可能依赖前一个的结果
+    for (const preprocessor of this.preprocessors) {
+      try {
+        await preprocessor.process(doc, context);
+      } catch (err) {
+        console.error('[PageArchiver] Preprocessor failed:', err, preprocessor.constructor.name);
+        // 这里选择继续执行，而不是中断整个流程，除非是致命错误
+      }
+    }
+  }
+
+  getResourceGraph() {
+    // 这里可以返回当前的资源图实例，供外部查询或调试
+    // 注意：如果需要在处理器中访问图结构，建议在 context 中传递图实例
+    return this.graph; // 目前每次调用都会返回新实例，实际项目中应保持单例或适当管理生命周期
   }
 }
