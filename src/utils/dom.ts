@@ -35,3 +35,40 @@ export function findAndMarkHiddenElements(doc: Document): Element[] {
   
   return hiddenElements;
 }
+
+/**
+ * 根据图片 URL 获取图片的实际尺寸
+ * @param url 图片 URL
+ * @returns Promise<{ width: number; height: number }>
+ */
+export function getImageSizeByUrl(url: string): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      resolve({ width: img.naturalWidth, height: img.naturalHeight });
+    };
+    img.onerror = (err) => {
+      reject(err);
+    };
+    img.src = url;
+  });
+}
+
+/**
+ * 获取图片大小（如果图片已经加载完成则直接返回，否则等待加载完成）
+ * @param img HTMLImageElement
+ * @returns Promise<{ width: number; height: number }>
+ */
+export function getImageSizeByElement(img: HTMLImageElement): Promise<{ width: number; height: number }> {
+  if (img.complete) {
+    return Promise.resolve({ width: img.naturalWidth, height: img.naturalHeight });
+  }
+  return new Promise((resolve, reject) => {
+    img.onload = () => {
+      resolve({ width: img.naturalWidth, height: img.naturalHeight });
+    };
+    img.onerror = (err) => {
+      reject(err);
+    };
+  });
+}
