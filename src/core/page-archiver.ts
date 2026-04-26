@@ -1,17 +1,17 @@
 // src/core/page-archiver.ts
 
-import type { ResourceProcessor } from '../processors/index';
-import { ResourceGraph } from './resource-graph';
 import type { ArchivingOptions, ArchivingContext, ArchivedResource } from '../models/options';
-import type { Resource } from '../models/resource';
-import { createResourceFromNode } from '../models/resource'; // 假设的工厂函数
-import { IDocPreprocessor } from './types';
-import { findAndMarkHiddenElements } from '../utils/dom';
+import { ResourceGraph } from './resource-graph';
+import { createResourceFromNode } from '../models/resource'; // 工厂函数
+import { IDocPreprocessor, CollectProcessor, ResourceProcessor } from './types';
+import { collectAndMarkResourceNodes, collectResourceNodes } from '../utils/dom';
 
 /**
  * 页面归档主类
  */
 export class PageArchiver {
+  // 资源处理器列表
+  private collectProcessors: CollectProcessor[] = [];
   // 预处理器列表
   private preprocessors: IDocPreprocessor[] = [];
   private processors: ResourceProcessor[] = [];
@@ -60,10 +60,12 @@ export class PageArchiver {
     const context: ArchivingContext = {
       pageUrl: doc instanceof Document ? doc.location?.href || '' : window.location.href,
       options: this.options,
+      graph: this.graph, // 让处理器也能访问图结构，便于资源间关联（如 CSS 引用的图片）
       cache: new Map<string, string>() // URL -> DataURI 缓存
     };
 
-    this.markElements(); // 标记隐藏元素，供预处理器使用
+    // 收集所有可能包含外部资源的 DOM 节点（如 <img>、<link>、<script> 等），并为每个节点打上唯一 ID 以便后续处理器定位
+    await this.runCollectProcessors(context);
 
     // 1. 克隆文档 (在此处克隆，确保原始页面不受影响)
     // 注意：如果是跨域 iframe 内容，cloneNode 可能无法复制某些属性，需注意
@@ -73,7 +75,7 @@ export class PageArchiver {
     await this.runPreprocessors(workingDoc, context);
 
     // 3. 收集所有待处理节点
-    const nodesToProcess = this.collectNodes(workingDoc);
+    const nodesToProcess = collectResourceNodes(workingDoc);
 
     // 4. 构建资源图
     // const graph = new ResourceGraph();
@@ -103,25 +105,6 @@ export class PageArchiver {
     // 6. 序列化为单文件 HTML
     const serialized = this.serialize(workingDoc, this.graph, context);
     return serialized;
-  }
-
-  /**
-   * 收集所有可能包含外部资源的 DOM 节点
-   */
-  private collectNodes(root: Document | HTMLElement): Element[] {
-    const walker = document.createTreeWalker(
-      root instanceof Document ? root.documentElement : root,
-      NodeFilter.SHOW_ELEMENT,
-      null
-    );
-
-    const nodes: Element[] = [];
-    let node: Element | null;
-    while ((node = walker.nextNode() as Element | null)) {
-      node.setAttribute('data-archiver-id', `${nodes.length}`); // 给每个节点打上唯一 ID 以便后续定位
-      nodes.push(node);
-    }
-    return nodes;
   }
 
   /**
@@ -202,14 +185,30 @@ export class PageArchiver {
     }
   }
 
+  // 批量注册收集器（策略模式）
+  registerCollectProcessors(collectProcessors: CollectProcessor[]): void {
+    this.collectProcessors.push(...collectProcessors);
+  }
+  // 运行所有资源处理器
+  private async runCollectProcessors(context: ArchivingContext): Promise<void> {
+    const { nodes } = collectAndMarkResourceNodes(document);
+    const processingPromises = nodes.map(async (node) => {
+      const processor = this.collectProcessors.find(p => p.match(node));
+      if (!processor) {
+        return null;
+      }
+      try {
+        await processor.process(node, context);
+      } catch (error) {
+        console.log('[PageArchiver] Collect processor failed:', error, processor.constructor.name);
+      }
+    });
+    await Promise.all(processingPromises);
+  }
+
   getResourceGraph() {
     // 这里可以返回当前的资源图实例，供外部查询或调试
     // 注意：如果需要在处理器中访问图结构，建议在 context 中传递图实例
     return this.graph; // 目前每次调用都会返回新实例，实际项目中应保持单例或适当管理生命周期
-  }
-
-  // 给隐藏元素打标记，供预处理器使用（如 RemoveHiddenElementsPreprocessor）
-  private markElements() {
-    this.removedElements = findAndMarkHiddenElements(document);
   }
 }

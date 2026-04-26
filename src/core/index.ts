@@ -2,11 +2,17 @@
 import { PageArchiver } from './page-archiver';
 import { StyleProcessor } from '../processors/style-processor';
 // import other processors...
+import { ImageCollector } from '@/collectors/index'; // 导入收集器
 
 const archiver = new PageArchiver({
   timeout: 20000,
   inlineStyles: true
 });
+
+archiver.registerCollectProcessors([
+  new ImageCollector()
+]);
+
 
 archiver.registerProcessor(new StyleProcessor());
 // archiver.registerProcessor(new ImageProcessor());

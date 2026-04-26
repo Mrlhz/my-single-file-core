@@ -1,5 +1,7 @@
 // src/models/options.ts
 
+import { ResourceGraph } from '../core/resource-graph';
+
 /**
  * 用户可配置的归档选项
  */
@@ -50,9 +52,23 @@ export interface ArchivingContext {
   options: ArchivingOptions;
 
   /**
+   * 资源图实例，处理器可读写，供整个归档过程使用
+   */
+  graph: ResourceGraph;
+
+  /**
    * 资源缓存：URL -> DataURI，避免重复下载
    */
   cache: Map<string, string>;
+  /**
+   * 用于存储预处理阶段产生的全局数据（如已处理的资源列表、页面元数据等），供后续阶段使用
+   * 页面元数据（如 title、favicon 等），处理器可读写，最终嵌入 HTML
+   */
+  metadata?: {
+    favicon?: string; // 保存处理后的 favicon dataURI
+    title?: string;
+    [key: string]: any;
+  };
 }
 
 /**

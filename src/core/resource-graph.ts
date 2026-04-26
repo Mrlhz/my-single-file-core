@@ -2,12 +2,29 @@
 
 import { Resource } from '../models/resource';
 
+// 'canvas' | 'image' | 'poster' | 'video' | 'usedFont' | 'shadowRoot' | 'markedElement'
+export type elementsType = 'canvases' | 'images' | 'posters' | 'videos' | 'usedFonts' | 'shadowRoots' | 'markedElements';
+
 /**
  * 资源依赖图（当前简化为资源集合）
  * 未来可支持：依赖顺序、循环检测、懒加载资源等
  */
 export class ResourceGraph {
   private resources: Resource[] = [];
+  private elementsInfo: Map<elementsType, any[]> = new Map(); // 用于存储不同类型元素的列表，供后续预处理器使用
+  private images: any[] = []; // 存储图片元素的信息，供后续预处理器使用
+  // private resourceDependencies: Map<string, Set<string>> = new Map(); // 资源依赖关系图，Key 是资源 URL，Value 是该资源依赖的其他资源 URL 的集合
+
+  constructor() {
+    // 初始化资源图
+    this.elementsInfo.set('images', this.images); // 初始化图片元素列表，供后续预处理器使用
+    this.elementsInfo.set('canvases', []); // 初始化 canvas 元素列表，供后续预处理器使用
+    this.elementsInfo.set('posters', []); // 初始化 video poster 元素列表，供后续预处理器使用
+    this.elementsInfo.set('videos', []); // 初始化 video 元素列表，供后续预处理器使用
+    this.elementsInfo.set('usedFonts', []); // 初始化已使用字体列表，供后续预处理器使用
+    this.elementsInfo.set('shadowRoots', []); // 初始化 Shadow DOM 列表，供后续预处理器使用
+    this.elementsInfo.set('markedElements', []); // 初始化被标记元素列表，供后续预处理器使用
+  }
 
   /**
    * 添加一个已处理的资源
@@ -42,5 +59,20 @@ export class ResourceGraph {
    */
   size(): number {
     return this.resources.length;
+  }
+
+  addElementInfo(type: elementsType, info: any): void {
+    if (!this.elementsInfo.has(type)) {
+      this.elementsInfo.set(type, []);
+    }
+    this.elementsInfo.get(type)!.push(info);
+  }
+
+  getElementInfo(type: elementsType): any[] {
+    return this.elementsInfo.get(type) || [];
+  }
+
+  getAllElementInfo(): Map<elementsType, any[]> {
+    return this.elementsInfo;
   }
 }
