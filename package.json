@@ -3,23 +3,24 @@
   "version": "0.1.0",
   "description": "A modular single-file web page archiver for browser extensions",
   "type": "module",
-  "main": "./dist/my-single-file.umd.cjs",
+  "main": "./dist/my-single-file.umd.js",
   "module": "./dist/my-single-file.es.js",
-  "unpkg": "./dist/my-single-file.umd.cjs",
-  "jsdelivr": "./dist/my-single-file.umd.cjs",
+  "unpkg": "./dist/my-single-file.umd.js",
+  "jsdelivr": "./dist/my-single-file.umd.js",
   "types": "./dist/core/index.d.ts",
   "exports": {
     ".": {
       "import": "./dist/my-single-file.es.js",
-      "require": "./dist/my-single-file.umd.cjs"
+      "require": "./dist/my-single-file.umd.js"
     }
   },
-  "browser": "./dist/my-single-file.umd.cjs",
+  "browser": "./dist/my-single-file.umd.js",
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "vite build",
+    "build": "vite build && npm run copy:examples", 
+    "copy:examples": "node scripts/copy-examples.js",
     "dev": "vite build --watch",
     "typecheck": "tsc --noEmit"
   },
