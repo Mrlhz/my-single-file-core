@@ -19,14 +19,14 @@
     "dist"
   ],
   "scripts": {
-    "build": "vite build && npm run copy:examples", 
+    "build": "vite build && npm run copy:examples",
     "copy:examples": "node scripts/copy-examples.js",
     "dev": "vite build --watch",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "typescript": "^6.0.2",
-    "vite": "^8.0.3"
+    "typescript": "^6.0.3",
+    "vite": "^8.0.10"
   },
   "dependencies": {
     "css-tree": "^3.2.1"
