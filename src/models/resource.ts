@@ -1,6 +1,8 @@
 // src/models/resource.ts
 
-import type { ArchivedResource } from './options';
+import { IMAGE_ATTRIBUTE_NAME } from '@/utils/constants';
+import type { ArchivedResource, ArchivingContext } from './options';
+import { getPlaceholderDataURI } from '@/utils/dom';
 
 /**
  * 资源类型枚举
@@ -35,14 +37,35 @@ export class Resource {
   /**
    * 将资源应用回 DOM 节点（内联化）
    */
-  applyTo(node: Element): void {
+  applyTo(context: ArchivingContext, node: Element): void {
     switch (this.type) {
       case 'image': {
         const img = node as HTMLImageElement;
-        img.src = this.data; // data:image/png;base64,...
+        // img.src = this.data; // data:image/png;base64,...
         // 移除可能存在的 srcset/lazy loading
         img.removeAttribute('srcset');
         img.removeAttribute('loading');
+
+        const archiverImageId = node.getAttribute(IMAGE_ATTRIBUTE_NAME);
+        const cssVarName = `--archiver-image-${archiverImageId}`;
+
+        const existingResource = context.graph.getImageResource(archiverImageId || '');
+
+        if (existingResource?.content && context.graph.getCSSVariable(cssVarName) === undefined) {
+          context.graph.setCSSVariable(`url(${existingResource.content})`, cssVarName);
+
+          img.classList.add('sf-img'); // 添加样式类，确保背景图能正确显示
+          // 兼容背景图
+          // 通过 CSS 变量设置背景图，确保在样式中也能使用这个资源
+          img.setAttribute('style', `background-image: var(${cssVarName})!important;`);
+          // 设置占位图，实际图片通过 CSS 变量背景图显示
+          img.setAttribute('src', getPlaceholderDataURI(existingResource.size.width, existingResource.size.height));
+        } else if (existingResource?.content && context.graph.getCSSVariable(cssVarName)) {
+          // 已存在资源且 CSS 变量已设置，直接使用 CSS 变量
+          img.classList.add('sf-img'); // 添加样式类，确保背景图能正确显示
+          img.setAttribute('style', `background-image: var(${cssVarName})!important;`);
+          img.setAttribute('src', getPlaceholderDataURI(existingResource.size.width, existingResource.size.height));
+        }
         break;
       }
 
