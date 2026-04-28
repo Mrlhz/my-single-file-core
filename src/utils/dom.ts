@@ -1,3 +1,5 @@
+// src/utils/dom.ts
+
 import { DATA_ID_ATTRIBUTE_NAME, KEPT_TAG_NAMES, REMOVED_CONTENT_ATTRIBUTE_NAME } from './constants';
 
 export function testHiddenElement(element: Element, computedStyle: CSSStyleDeclaration | null) {
@@ -85,6 +87,11 @@ export function getImageSrc(img: HTMLImageElement): string | null {
   return img.src || null;
 }
 
+// 获取占位图的 DataURI
+export function getPlaceholderDataURI(width: number = 16, height: number = 16): string {
+  return `data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect fill-opacity="0"/></svg>`;
+}
+
 // 收集文档各类资源节点（如图片、视频、音频等），并为每个节点打上唯一 ID 以便后续处理器定位
 export function collectResourceNodes(root: Document | HTMLElement): Element[] {
   const nodes: Element[] = [];
@@ -136,4 +143,17 @@ export function collectAndMarkResourceNodes(root: Document | HTMLElement): { nod
     }
   }
   return { nodes, hiddenElements };
+}
+
+// 将 CSS 变量组合成style内容
+export function joinCSSVariables(variables: Record<string, string>): string {
+  const cssText = Object.entries(variables).map(([key, value]) => `${value}: ${key};`).join('\n');
+  return `:root {\n${cssText}\n}`;
+}
+
+// 插入style元素到文档头部
+export function insertStyleElement(root: Document | HTMLElement, cssText: string): void {
+  const styleElement = document.createElement('style');
+  styleElement.textContent = cssText;
+  (root instanceof Document ? root.head : root.querySelector('head'))?.appendChild(styleElement);
 }
