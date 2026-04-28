@@ -1,6 +1,7 @@
 // src/core/resource-graph.ts
 
 import { Resource } from '../models/resource';
+import type { ArchivingImageData } from '@/core/types';
 
 // 'canvas' | 'image' | 'poster' | 'video' | 'usedFont' | 'shadowRoot' | 'markedElement'
 export type elementsType = 'canvases' | 'images' | 'posters' | 'videos' | 'usedFonts' | 'shadowRoots' | 'markedElements';
@@ -13,6 +14,12 @@ export class ResourceGraph {
   private resources: Resource[] = [];
   private elementsInfo: Map<elementsType, any[]> = new Map(); // 用于存储不同类型元素的列表，供后续预处理器使用
   private images: any[] = []; // 存储图片元素的信息，供后续预处理器使用
+
+  // 图片url和资源对象的映射，供后续预处理器使用
+  private imageUrlToResourceMap: Map<string, ArchivingImageData> = new Map();
+
+  // css全局变量列表，供后续预处理器使用
+  private cssVariables: Map<string, string> = new Map();
   // private resourceDependencies: Map<string, Set<string>> = new Map(); // 资源依赖关系图，Key 是资源 URL，Value 是该资源依赖的其他资源 URL 的集合
 
   constructor() {
@@ -24,6 +31,9 @@ export class ResourceGraph {
     this.elementsInfo.set('usedFonts', []); // 初始化已使用字体列表，供后续预处理器使用
     this.elementsInfo.set('shadowRoots', []); // 初始化 Shadow DOM 列表，供后续预处理器使用
     this.elementsInfo.set('markedElements', []); // 初始化被标记元素列表，供后续预处理器使用
+
+    this.cssVariables = new Map(); // 初始化 CSS 全局变量列表，供后续预处理器使用
+    this.imageUrlToResourceMap = new Map(); // 初始化图片 URL 到 Resource 对象的映射，供后续预处理器使用
   }
 
   /**
@@ -74,5 +84,31 @@ export class ResourceGraph {
 
   getAllElementInfo(): Map<elementsType, any[]> {
     return this.elementsInfo;
+  }
+
+  // 设置 CSS 全局变量
+  setCSSVariable(name: string, value: string): void {
+    this.cssVariables.set(name, value);
+  }
+
+  // 获取 CSS 全局变量
+  getCSSVariable(name: string): string | undefined {
+    return this.cssVariables.get(name);
+  }
+
+  // 获取所有 CSS 全局变量对象
+  getAllCSSVariables(): Record<string, string> {
+    return Object.fromEntries(this.cssVariables.entries());
+  }
+  // 获取CSS 全局变量
+  getCSSVariables(): Map<string, string> {
+    return this.cssVariables;
+  }
+
+  setImageResource(url: string, resource: ArchivingImageData): void {
+    this.imageUrlToResourceMap.set(url, resource);
+  }
+  getImageResource(url: string): ArchivingImageData | undefined {
+    return this.imageUrlToResourceMap.get(url);
   }
 }

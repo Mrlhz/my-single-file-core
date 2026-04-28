@@ -4,7 +4,9 @@ import type { ArchivingOptions, ArchivingContext, ArchivedResource } from '../mo
 import { ResourceGraph } from './resource-graph';
 import { createResourceFromNode } from '../models/resource'; // 工厂函数
 import { IDocPreprocessor, CollectProcessor, ResourceProcessor } from './types';
-import { collectAndMarkResourceNodes, collectResourceNodes } from '../utils/dom';
+import { collectAndMarkResourceNodes, collectResourceNodes, joinCSSVariables, insertStyleElement } from '../utils/dom';
+import { BatchRequest, ResourceResult } from '@/utils/BatchRequest';
+import { IMAGE_ELEMENT_STYLE } from '@/utils/constants';
 
 /**
  * 页面归档主类
@@ -17,7 +19,8 @@ export class PageArchiver {
   private processors: ResourceProcessor[] = [];
   private options: ArchivingOptions;
   private graph: ResourceGraph;
-  private removedElements: Element[] = []; // 用于存储被标记为移除的元素，供后续处理
+  // 批量请求工具，供处理器使用，避免重复请求和优化网络性能
+  private bathRequest: BatchRequest;
 
   constructor(options: Partial<ArchivingOptions> = {}) {
     this.options = {
@@ -26,6 +29,7 @@ export class PageArchiver {
     };
 
     this.graph = new ResourceGraph();
+    this.bathRequest = new BatchRequest();
   }
 
   // 注册文档预处理器（策略模式）
@@ -61,11 +65,15 @@ export class PageArchiver {
       pageUrl: doc instanceof Document ? doc.location?.href || '' : window.location.href,
       options: this.options,
       graph: this.graph, // 让处理器也能访问图结构，便于资源间关联（如 CSS 引用的图片）
+      bathRequest: this.bathRequest, // 让处理器也能使用批量请求工具，优化网络性能
       cache: new Map<string, string>() // URL -> DataURI 缓存
     };
 
     // 收集所有可能包含外部资源的 DOM 节点（如 <img>、<link>、<script> 等），并为每个节点打上唯一 ID 以便后续处理器定位
     await this.runCollectProcessors(context);
+
+    // 发起批量请求，等待所有资源数据准备就绪（如图片的 Base64 数据）
+    await this.injectResourceDataIntoGraph(context);
 
     // 1. 克隆文档 (在此处克隆，确保原始页面不受影响)
     // 注意：如果是跨域 iframe 内容，cloneNode 可能无法复制某些属性，需注意
@@ -140,11 +148,13 @@ export class PageArchiver {
       if (!clonedNode) return;
 
       // 调用资源的 apply 方法（需在 Resource 类中定义）
-      resource.applyTo(clonedNode);
+      resource.applyTo(context, clonedNode);
     });
 
     // 序列化为字符串
     if (clone instanceof Document) {
+      const rootStyle = joinCSSVariables(Object.fromEntries(graph.getCSSVariables()));
+      insertStyleElement(clone, [rootStyle, IMAGE_ELEMENT_STYLE].join('\n'));
       return new XMLSerializer().serializeToString(clone);
     } else {
       return clone.outerHTML;
@@ -210,5 +220,29 @@ export class PageArchiver {
     // 这里可以返回当前的资源图实例，供外部查询或调试
     // 注意：如果需要在处理器中访问图结构，建议在 context 中传递图实例
     return this.graph; // 目前每次调用都会返回新实例，实际项目中应保持单例或适当管理生命周期
+  }
+
+  /**
+   * 处理批量请求结果，将资源数据注入到资源图中
+   */
+  async injectResourceDataIntoGraph(context: ArchivingContext): Promise<void> {
+    // 发起批量请求，等待所有资源数据准备就绪（如图片的 Base64 数据）
+    const result: ResourceResult[] = await this.bathRequest.runAll(() => {}, context.options);
+    console.log('[PageArchiver] All resources processed:', result);
+
+    // 将base64数据注入回资源图，供后续处理器使用
+    const imageDataMap = new Map<string, string>(result.map(({ url, content }) => [url, content]));
+    const images = context.graph.getAllElementInfo().get('images');
+    if (Array.isArray(images)) {
+      images.forEach((imgInfo: any) => {
+        const { url } = imgInfo;
+        if (imageDataMap.has(url)) {
+          imgInfo.content = imageDataMap.get(url) || '';
+        }
+
+        context.graph.setImageResource(imgInfo.archiverId, imgInfo);
+        context.cache.set(url, imgInfo.content); // 同时更新缓存，供后续处理器使用
+      });
+    }
   }
 }

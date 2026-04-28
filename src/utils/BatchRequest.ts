@@ -1,10 +1,20 @@
 // src/utils/BatchRequest.ts
 
-interface resourceRequests {
-  resolve: (value: any) => void;
-  reject: (reason?: any) => void;
-}[]
+/**
+ * 类型定义
+ */
+export interface ResourceResult {
+  url: string;
+  content: string | null; // Data URI string or null if failed
+}
 
+interface RequestCallbacks {
+  resolve: (value: ResourceResult) => void;
+  reject: (reason?: any) => void;
+}
+
+export type ProgressCallback = (loaded: number, total: number) => void;
+export type OnLoadListener = (url: string, options?: any) => Promise<void> | void;
 
 /**
  * 批量请求工具类
@@ -12,17 +22,15 @@ interface resourceRequests {
  */
 
 export class BatchRequest {
-  private requests: Map<string, Promise<any>>; // Key 是请求的唯一标识，Value 是对应的 Promise
-  private duplicates: Map<string, Promise<any>>; // 用于存储重复请求的结果，避免重复请求同一资源
+  private requests: Map<string, RequestCallbacks[]>; // Key 是请求的唯一标识，Value 是对应的 Promise
   private cancelled = false; // 用于标记是否取消了请求
   constructor() {
 		this.requests = new Map();
-		this.duplicates = new Map();
   }
 
-  addURL(requestKey: string): Promise<any> {
-    const { promise, resolve, reject } = Promise.withResolvers();
-    let resourceRequests: resourceRequests = this.requests.get(requestKey) as unknown as resourceRequests;
+  addURL(requestKey: string): Promise<ResourceResult> {
+    const { promise, resolve, reject } = Promise.withResolvers<ResourceResult>();
+    let resourceRequests = this.requests.get(requestKey)
     if (!resourceRequests) {
       resourceRequests = [];
       this.requests.set(requestKey, resourceRequests);
@@ -32,14 +40,14 @@ export class BatchRequest {
     return promise;
   }
 
-  async runAll(onloadListener = () => {}, options) {
+  async runAll(onloadListener?: OnLoadListener, options?: any): Promise<ResourceResult[]> {
     const resourceURLs = Array.from(this.requests.keys());
     const total = resourceURLs.length;
     let completed = 0;
-    const results: { url: string; content: any }[] = [];
+    const results: ResourceResult[] = [];
 
     const tasks = resourceURLs.map(async url => {
-			const resourceRequests: resourceRequests = this.requests.get(url) as unknown as resourceRequests;
+			const resourceRequests = this.requests.get(url) || [];
       try {
         const content = await fetchToDataUri(url, (loaded, total) => {
           console.log(`下载进度: ${url} - ${((loaded / total) * 100).toFixed(2)}%`);
@@ -73,11 +81,12 @@ export class BatchRequest {
     return results;
   }
 
-  getResult(key: string): Promise<any> | undefined {
-    if (this.duplicates.has(key)) {
-      return this.duplicates.get(key);
-    }
-    return this.requests.get(key);
+  cancel() {
+    this.cancelled = true;
+    this.requests.forEach((callbacks, url) => {
+      callbacks.forEach(({ reject }) => reject(new Error('请求已取消')));
+    });
+    this.requests.clear();
   }
 
   getAllResults(): Promise<any[]> {

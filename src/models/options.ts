@@ -1,5 +1,6 @@
 // src/models/options.ts
 
+import { BatchRequest } from '@/utils/BatchRequest';
 import { ResourceGraph } from '../core/resource-graph';
 
 /**
@@ -55,6 +56,11 @@ export interface ArchivingContext {
    * 资源图实例，处理器可读写，供整个归档过程使用
    */
   graph: ResourceGraph;
+
+  /**
+   * 批量请求工具，供处理器使用，避免重复请求和优化网络性能
+   */
+  bathRequest: BatchRequest;
 
   /**
    * 资源缓存：URL -> DataURI，避免重复下载

@@ -3,6 +3,7 @@
 import { IMAGE_ATTRIBUTE_NAME } from '@/utils/constants';
 import type { ArchivedResource, ArchivingContext } from './options';
 import { getPlaceholderDataURI } from '@/utils/dom';
+import { ArchivingImageData } from '@/core/types';
 
 /**
  * 资源类型枚举
@@ -46,26 +47,7 @@ export class Resource {
         img.removeAttribute('srcset');
         img.removeAttribute('loading');
 
-        const archiverImageId = node.getAttribute(IMAGE_ATTRIBUTE_NAME);
-        const cssVarName = `--archiver-image-${archiverImageId}`;
-
-        const existingResource = context.graph.getImageResource(archiverImageId || '');
-
-        if (existingResource?.content && context.graph.getCSSVariable(cssVarName) === undefined) {
-          context.graph.setCSSVariable(`url(${existingResource.content})`, cssVarName);
-
-          img.classList.add('sf-img'); // 添加样式类，确保背景图能正确显示
-          // 兼容背景图
-          // 通过 CSS 变量设置背景图，确保在样式中也能使用这个资源
-          img.setAttribute('style', `background-image: var(${cssVarName})!important;`);
-          // 设置占位图，实际图片通过 CSS 变量背景图显示
-          img.setAttribute('src', getPlaceholderDataURI(existingResource.size.width, existingResource.size.height));
-        } else if (existingResource?.content && context.graph.getCSSVariable(cssVarName)) {
-          // 已存在资源且 CSS 变量已设置，直接使用 CSS 变量
-          img.classList.add('sf-img'); // 添加样式类，确保背景图能正确显示
-          img.setAttribute('style', `background-image: var(${cssVarName})!important;`);
-          img.setAttribute('src', getPlaceholderDataURI(existingResource.size.width, existingResource.size.height));
-        }
+        processImageNode(img, context);
         break;
       }
 
@@ -122,4 +104,45 @@ export class Resource {
  */
 export function createResourceFromNode(node: Element, archived: ArchivedResource): Resource {
   return Resource.fromArchived(archived, node);
+}
+
+/**
+ * 处理图像节点，将其转换为使用CSS变量背景图的形式
+ * @param node - HTML图像元素节点
+ * @param context - 归档过程中的运行时上下文，包含资源图谱等信息
+ * @param getPlaceholderDataURI - 获取占位图数据URI的方法
+ */
+function processImageNode(
+  node: HTMLElement,
+  context: ArchivingContext
+): void {
+  const img = node as HTMLImageElement;
+  const archiverImageId = node.getAttribute(IMAGE_ATTRIBUTE_NAME);
+  if (!archiverImageId) return;
+
+  const cssVarName = `--archiver-image-${archiverImageId}`;
+  const existingResource = context.graph.getImageResource(archiverImageId);
+
+  if (!existingResource?.content) return;
+
+  // 如果CSS变量不存在，则创建它
+  if (context.graph.getCSSVariable(cssVarName) === undefined) {
+    context.graph.setCSSVariable(`url(${existingResource.content})`, cssVarName);
+  }
+
+  // 统一处理：添加样式类、设置背景图、设置占位图
+  applyImageStyles(img, cssVarName, existingResource);
+}
+
+/**
+ * 应用图像样式和属性
+ */
+function applyImageStyles(
+  img: HTMLImageElement,
+  cssVarName: string,
+  imageData: ArchivingImageData
+): void {
+  img.classList.add('sf-img');
+  img.setAttribute('style', `background-image: var(${cssVarName})!important;`);
+  img.setAttribute('src', getPlaceholderDataURI(imageData.size.width, imageData.size.height));
 }
