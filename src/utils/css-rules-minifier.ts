@@ -35,119 +35,76 @@ interface RemoveUnusedCssOptions {
 }
 export function removeUnusedCss(options: RemoveUnusedCssOptions): string {
   const { rawCss, domContext, doc } = options;
-  // --- 第一步：从当前 DOM 收集指纹 ---
   const domSnapshot = domContext || getDOMSnapshot(doc);
-  const { classes, tags, ids } = domSnapshot;
-  console.log('[removeUnusedCss] DOM Snapshot:', { classes, tags, ids });
-  const usedClasses = new Set([...classes]);
-  const usedIds = new Set([...ids]);
-  const usedTags = new Set([...tags]);
-  // --- 第二步：解析 CSS 为 AST ---
+  const usedClasses = new Set(domSnapshot.classes);
+  const usedIds = new Set(domSnapshot.ids);
+  const usedTags = new Set(domSnapshot.tags);
+
   let ast: any;
   try {
-    // 3.x 建议：除非你需要操作 @media 等内部逻辑，否则保持 false 以提升速度
-    ast = csstree.parse(rawCss, { positions: false, parseRulePrelude: true });
+    ast = csstree.parse(rawCss, { 
+      positions: false, 
+      parseRulePrelude: true // 关键：必须开启，否则无法遍历选择器内部
+    });
   } catch (e) {
     console.error('[removeUnusedCss] CSS 解析错误:', e);
-    return rawCss; // 解析失败时返回原始 CSS
+    return rawCss;
   }
-  // --- 第三步：遍历 AST 并筛选，移除未使用的规则 ---
+
   csstree.walk(ast, {
     visit: 'Rule',
     enter(node: any, item: any, list: any) {
-      // 标记当前 Rule 是否包含“存活”的选择器
-      let ruleHasUsedSelector = false;
-      // 遍历该规则下的所有选择器
-      // 注意：一个规则可能包含多个选择器，如 ".btn, .old-btn { ... }"
-      csstree.walk(node.prelude, {
-        visit: 'Selector',
-        enter(selectorNode: any) {
-          let selectorIsUsed = false;
-          csstree.walk(selectorNode, {
-            visit: 'ClassSelector',
-            enter(classNode: any) {
-              // classNode.name 直接就是字符串，如 "btn"
-              if (usedClasses.has(classNode.name)) {
-                selectorIsUsed = true;
+      // 在 Prelude (选择器列表) 中查找是否有匹配的选择器
+      let hasVisibleSelector = false;
+
+      // 遍历 SelectorList 下的每一个 Selector
+      if (node.prelude && node.prelude.type === 'SelectorList') {
+        node.prelude.children.each((selectorNode: any, selectorItem: any, selectorList: any) => {
+          let isSelectorUsed = true; // 默认假设使用，除非找到证据证明没用
+
+          // 遍历单个选择器中的所有原子（Class, Id, Type）
+          csstree.walk(selectorNode, (subNode: any) => {
+            if (subNode.type === 'ClassSelector' && !usedClasses.has(subNode.name)) {
+              isSelectorUsed = false;
+            }
+            if (subNode.type === 'IdSelector' && !usedIds.has(subNode.name)) {
+              isSelectorUsed = false;
+            }
+            if (subNode.type === 'TypeSelector' && !usedTags.has(subNode.name.toLowerCase())) {
+              // 排除通配符 *
+              if (subNode.name !== '*') {
+                isSelectorUsed = false;
               }
             }
           });
 
-          if (!selectorIsUsed) {
-            csstree.walk(selectorNode, {
-              visit: 'AttributeSelector',
-              enter(attrNode: any) {
-                // 处理 [class~="btn"] 这种情况
-                if (attrNode.name === 'class' && attrNode.value && usedClasses.has(attrNode.value.value)) {
-                  selectorIsUsed = true;
-                }
-              }
-            });
+          if (!isSelectorUsed) {
+            // 如果这个规则有多个选择器（.a, .b），移除不匹配的那一个
+            selectorList.remove(selectorItem);
+          } else {
+            hasVisibleSelector = true;
           }
+        });
+      }
 
-          if (!selectorIsUsed) {
-            csstree.walk(selectorNode, {
-              visit: 'PseudoClassSelector',
-              enter(pseudoNode: any) {
-                // 处理 :not(.btn) 这种情况，虽然不常见，但可以提高准确率
-                if (pseudoNode.name === 'not' && pseudoNode.children) {
-                  csstree.walk(pseudoNode.children, {
-                    visit: 'ClassSelector',
-                    enter(notClassNode: any) {
-                      if (usedClasses.has(notClassNode.name)) {
-                        selectorIsUsed = true;
-                      }
-                    }
-                  });
-                }
-              }
-            });
-          }
-
-          // 如果类名没匹配到，继续检查 ID (只有当还没判定为 Used 时才检查，节省性能)
-          if (!selectorIsUsed) {
-            csstree.walk(selectorNode, {
-              visit: 'IdSelector',
-              enter(idNode: any) {
-                if (usedIds.has(idNode.name)) {
-                  selectorIsUsed = true;
-                }
-              }
-            });
-          }
-          
-          // 如果 ID 也没匹配到，检查标签名
-          if (!selectorIsUsed) {
-            csstree.walk(selectorNode, {
-              visit: 'TypeSelector',
-              enter(typeNode: any) {
-                if (usedTags.has(typeNode.name)) {
-                  selectorIsUsed = true;
-                }
-              }
-            });
-          }
-
-          // 只要有一个选择器被使用，整个规则就保留
-          if (selectorIsUsed) {
-            ruleHasUsedSelector = true;
-          }
-        }
-      });
-
-      // --- 第四步：移除无用规则 ---
-      if (!ruleHasUsedSelector) {
-        list.remove(item); // 移除未使用的规则
+      // 如果 Rule 下的所有选择器都被移除了，则移除整个 Rule
+      if (!hasVisibleSelector || node?.prelude?.children?.isEmpty) {
+        list.remove(item);
       }
     }
   });
-  // --- 第五步：生成优化后的 CSS ---
-  try {
-    return csstree.generate(ast, { compress: true }); // 压缩输出
-  } catch (e) {
-    console.error('[removeUnusedCss] CSS 生成错误:', e);
-    return rawCss; // 生成失败时返回原始 CSS
-  }
+
+  // 处理空的 AtRule (例如 @media 内部的规则都被删光了)
+  csstree.walk(ast, {
+    visit: 'Atrule',
+    leave(node: any, item: any, list: any) {
+      if (node?.block?.children?.isEmpty) {
+        list.remove(item);
+      }
+    }
+  });
+
+  return csstree.generate(ast, { compress: true });
 }
 
 /**
