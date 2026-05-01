@@ -4,60 +4,16 @@ const csstree = (globalThis as any).csstree;
 
 const cssRulesMinifier = {
   /**
-   * 执行优化
-   * @param {string} cssText 原始CSS字符串
-   * @param {Object} options 配置项
+   * 
+   * @param cssText 
+   * @param doc 
    */
-  process(cssText: string, domContext: DOMSnapshot, options: { doc?: Document } = {}): string {
-    if (typeof csstree === 'undefined') {
-      console.warn('[cssRulesMinifier]未检测到 CSSTree 库，请先注入 http://unpkg.com/csstree. CSS minification skipped.');
-      return cssText;
-    }
-    let { doc } = options;
-    if (!doc && typeof document !== 'undefined') {
-      console.warn('[cssRulesMinifier]未提供 document 对象，CSS 选择器优化可能不准确。');
-      doc = document; // 回退到全局 document，虽然可能不适用于某些环境
-    } else if (!doc) {
-      console.warn('[cssRulesMinifier]未提供 document 对象，且全局 document 不可用。CSS 选择器优化将被跳过。');
-      return cssText; // 无法进行选择器优化，直接返回原始 CSS
-    }
+  process(cssText: string, doc: Document): string {
     try {
-      // 1. 解析 CSS 文本为 AST
-      const ast = csstree.parse(cssText, { parseValue: false, parseRulePrelude: false });
-
-      // 2. 遍历 AST，移除不必要的规则和选择器
-      csstree.walk(ast, {
-        visit: 'Rule',
-        enter(node: any, item: any, list: any) {
-          // 遍历多重选择器
-          const childrens = node.prelude?.children ? Array.from(node.prelude.children) : [node.prelude];
-          childrens.forEach((selectorNode) => {
-            const selector = csstree.generate(selectorNode);
-            const simplifiedSelector = simplifySelectorForQuery(selector);
-            if (simplifiedSelector === '') {
-              // 如果简化后选择器为空，说明它完全由伪类/伪元素组成，保留它以避免误删
-              return;
-            }
-            try {
-              // 3. 使用 document.querySelector 检查选择器是否匹配当前页面的 DOM
-              if (!doc.querySelector(simplifiedSelector)) {
-                // 如果没有匹配的元素，说明这个选择器未被使用，可以从 AST 中移除
-                list.remove(item);
-              }
-            } catch (e) {
-              // 如果选择器无效（例如由于复杂的组合或语法错误），则保守地保留它
-              console.warn(`[cssRulesMinifier] 无法处理选择器 "${selector}"，保留原规则。`, e);
-            }
-          });
-        }
-      });
-
-      // 4. 生成优化后的 CSS 文本
-      return csstree.generate(ast);
-    } catch (e) {
-      console.error('[cssRulesMinifier]CSS minification error:', e);
-      // 出现错误时返回原始 CSS，避免破坏页面样式
-      return cssText;
+      return removeUnusedCss({ rawCss: cssText, doc });
+    } catch (error) {
+      console.error('[cssRulesMinifier] Error occurred:', error);
+      return removeUnusedCssByQuerySelector(cssText, doc);
     }
   }
 };
@@ -70,9 +26,129 @@ export default cssRulesMinifier;
 //   .unused-class { color: blue; }
 //   .menu-item:hover > a::after { content: ''; }
 // `;
-// const domSnapshot = getDOMSnapshot(document);
-// const minifiedCSS = cssRulesMinifier.process(originalCSS, domSnapshot, { doc: document });
-// console.log(minifiedCSS);
+// const optimizedCSS = cssRulesMinifier.process(originalCSS, document);
+
+interface RemoveUnusedCssOptions {
+  rawCss: string;
+  domContext?: DOMSnapshot;
+  doc: Document;
+}
+export function removeUnusedCss(options: RemoveUnusedCssOptions): string {
+  const { rawCss, domContext, doc } = options;
+  // --- 第一步：从当前 DOM 收集指纹 ---
+  const domSnapshot = domContext || getDOMSnapshot(doc);
+  const { classes, tags, ids } = domSnapshot;
+  console.log('[removeUnusedCss] DOM Snapshot:', { classes, tags, ids });
+  const usedClasses = new Set([...classes]);
+  const usedIds = new Set([...ids]);
+  const usedTags = new Set([...tags]);
+  // --- 第二步：解析 CSS 为 AST ---
+  let ast: any;
+  try {
+    // 3.x 建议：除非你需要操作 @media 等内部逻辑，否则保持 false 以提升速度
+    ast = csstree.parse(rawCss, { positions: false, parseRulePrelude: true });
+  } catch (e) {
+    console.error('[removeUnusedCss] CSS 解析错误:', e);
+    return rawCss; // 解析失败时返回原始 CSS
+  }
+  // --- 第三步：遍历 AST 并筛选，移除未使用的规则 ---
+  csstree.walk(ast, {
+    visit: 'Rule',
+    enter(node: any, item: any, list: any) {
+      // 标记当前 Rule 是否包含“存活”的选择器
+      let ruleHasUsedSelector = false;
+      // 遍历该规则下的所有选择器
+      // 注意：一个规则可能包含多个选择器，如 ".btn, .old-btn { ... }"
+      csstree.walk(node.prelude, {
+        visit: 'Selector',
+        enter(selectorNode: any) {
+          let selectorIsUsed = false;
+          csstree.walk(selectorNode, {
+            visit: 'ClassSelector',
+            enter(classNode: any) {
+              // classNode.name 直接就是字符串，如 "btn"
+              if (usedClasses.has(classNode.name)) {
+                selectorIsUsed = true;
+              }
+            }
+          });
+
+          if (!selectorIsUsed) {
+            csstree.walk(selectorNode, {
+              visit: 'AttributeSelector',
+              enter(attrNode: any) {
+                // 处理 [class~="btn"] 这种情况
+                if (attrNode.name === 'class' && attrNode.value && usedClasses.has(attrNode.value.value)) {
+                  selectorIsUsed = true;
+                }
+              }
+            });
+          }
+
+          if (!selectorIsUsed) {
+            csstree.walk(selectorNode, {
+              visit: 'PseudoClassSelector',
+              enter(pseudoNode: any) {
+                // 处理 :not(.btn) 这种情况，虽然不常见，但可以提高准确率
+                if (pseudoNode.name === 'not' && pseudoNode.children) {
+                  csstree.walk(pseudoNode.children, {
+                    visit: 'ClassSelector',
+                    enter(notClassNode: any) {
+                      if (usedClasses.has(notClassNode.name)) {
+                        selectorIsUsed = true;
+                      }
+                    }
+                  });
+                }
+              }
+            });
+          }
+
+          // 如果类名没匹配到，继续检查 ID (只有当还没判定为 Used 时才检查，节省性能)
+          if (!selectorIsUsed) {
+            csstree.walk(selectorNode, {
+              visit: 'IdSelector',
+              enter(idNode: any) {
+                if (usedIds.has(idNode.name)) {
+                  selectorIsUsed = true;
+                }
+              }
+            });
+          }
+          
+          // 如果 ID 也没匹配到，检查标签名
+          if (!selectorIsUsed) {
+            csstree.walk(selectorNode, {
+              visit: 'TypeSelector',
+              enter(typeNode: any) {
+                if (usedTags.has(typeNode.name)) {
+                  selectorIsUsed = true;
+                }
+              }
+            });
+          }
+
+          // 只要有一个选择器被使用，整个规则就保留
+          if (selectorIsUsed) {
+            ruleHasUsedSelector = true;
+          }
+        }
+      });
+
+      // --- 第四步：移除无用规则 ---
+      if (!ruleHasUsedSelector) {
+        list.remove(item); // 移除未使用的规则
+      }
+    }
+  });
+  // --- 第五步：生成优化后的 CSS ---
+  try {
+    return csstree.generate(ast, { compress: true }); // 压缩输出
+  } catch (e) {
+    console.error('[removeUnusedCss] CSS 生成错误:', e);
+    return rawCss; // 生成失败时返回原始 CSS
+  }
+}
 
 /**
  * 提取当前页面的 DOM 指纹
@@ -124,4 +200,68 @@ function simplifySelectorForQuery(selector: string): string {
     // 例如 "div > :hover" 变成 "div > "，这会导致 querySelector 报错
     .replace(/\s*[>+~]\s*$/, '')
     .trim();
+}
+
+// 通过document.querySelector 进行HTML选择器验证的优化器
+// 主要功能：移除未使用的CSS规则，减少最终CSS体积
+// 实现思路：解析CSS为AST，遍历选择器并使用document.querySelector验证是否匹配当前页面的DOM，如果不匹配则移除该规则
+// 注意事项：
+// - 该优化器适用于归档过程中对CSS进行清洗和压缩，确保最终归档文件体积更小，加载更快
+// - 需要提供当前页面的DOM上下文（Document对象）以进行选择器验证，如果无法提供则跳过优化
+// - 该优化器会保守地保留无法解析或验证的选择器，以避免误删导致页面样式破坏
+
+function removeUnusedCssByQuerySelector(cssText: string, doc: Document): string {
+  if (typeof csstree === 'undefined') {
+    console.log('[cssRulesMinifier]未检测到 CSSTree 库，请先注入 http://unpkg.com/csstree. CSS minification skipped.');
+    return cssText;
+  }
+  if (!doc && typeof document !== 'undefined') {
+    console.log('[cssRulesMinifier]未提供 document 对象，CSS 选择器优化可能不准确。');
+    doc = document; // 回退到全局 document，虽然可能不适用于某些环境
+  } else if (!doc) {
+    console.log('[cssRulesMinifier]未提供 document 对象，且全局 document 不可用。CSS 选择器优化将被跳过。');
+    return cssText; // 无法进行选择器优化，直接返回原始 CSS
+  }
+  try {
+    // 1. 解析 CSS 文本为 AST
+    const ast = csstree.parse(cssText, { parseValue: false, parseRulePrelude: false });
+
+    // 2. 遍历 AST，移除不必要的规则和选择器
+    csstree.walk(ast, {
+      visit: 'Rule',
+      enter(node: any, item: any, list: any) {
+        // 遍历多重选择器
+        const childrens = node.prelude?.children ? Array.from(node.prelude.children) : [node.prelude];
+        childrens.forEach((selectorNode) => {
+          const selector = csstree.generate(selectorNode);
+          const simplifiedSelector = simplifySelectorForQuery(selector);
+          if (simplifiedSelector === '') {
+            // 如果简化后选择器为空，说明它完全由伪类/伪元素组成，保留它以避免误删
+            return;
+          }
+          try {
+            // 3. 使用 document.querySelector 检查选择器是否匹配当前页面的 DOM
+            if (!doc.querySelector(simplifiedSelector)) {
+              // 如果没有匹配的元素，说明这个选择器未被使用，可以从 AST 中移除
+              list.remove(item);
+            }
+          } catch (e) {
+            // 如果选择器无效（例如由于复杂的组合或语法错误），则保守地保留它
+            console.log(`[cssRulesMinifier] 无法处理选择器 "${selector}"，保留原规则。`, e);
+          }
+        });
+        // 这里可以添加更多的优化逻辑，例如：
+        // - 移除未使用的 @keyframes 定义
+        // - 合并重复的规则
+        // - 压缩颜色值等
+      }
+    });
+
+    // 4. 生成优化后的 CSS 文本
+    return csstree.generate(ast, { compress: true });
+  } catch (e) {
+    console.error('[cssRulesMinifier]CSS minification error:', e);
+    // 出现错误时返回原始 CSS，避免破坏页面样式
+    return cssText;
+  }
 }
