@@ -120,14 +120,19 @@ function processImageNode(
   const archiverImageId = node.getAttribute(IMAGE_ATTRIBUTE_NAME);
   if (!archiverImageId) return;
 
-  const cssVarName = `--archiver-image-${archiverImageId}`;
   const existingResource = context.graph.getImageResource(archiverImageId);
 
   if (!existingResource?.content) return;
 
   // 如果CSS变量不存在，则创建它
-  if (context.graph.getCSSVariable(cssVarName) === undefined) {
-    context.graph.setCSSVariable(`url(${existingResource.content})`, cssVarName);
+  let cssVarName = `--archiver-image-${archiverImageId}`;
+  const content = `url(${existingResource.content})`;
+  const existingCssVar = context.graph.getCSSVariable(content);
+  if (!existingCssVar) {
+    context.graph.setCSSVariable(content, cssVarName);
+  } else {
+    // 如果已存在相同内容的CSS变量，复用它
+    cssVarName = existingCssVar;
   }
 
   // 统一处理：添加样式类、设置背景图、设置占位图
