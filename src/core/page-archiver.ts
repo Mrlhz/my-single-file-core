@@ -32,30 +32,6 @@ export class PageArchiver {
     this.bathRequest = new BatchRequest();
   }
 
-  // 注册文档预处理器（策略模式）
-  registerPreprocessor(preprocessor: IDocPreprocessor): void {
-    this.preprocessors.push(preprocessor);
-  }
-
-  // 批量注册预处理器
-  registerPreprocessors(preprocessors: IDocPreprocessor[]): void {
-    this.preprocessors.push(...preprocessors);
-  }
-
-  /**
-   * 注册资源处理器（策略模式）
-   */
-  registerProcessor(processor: ResourceProcessor): void {
-    this.processors.push(processor);
-  }
-
-  /**
-   * 批量注册处理器
-   */
-  registerProcessors(processors: ResourceProcessor[]): void {
-    this.processors.push(...processors);
-  }
-
   /**
    * 主归档入口
    */
@@ -116,18 +92,6 @@ export class PageArchiver {
   }
 
   /**
-   * 为节点查找匹配的处理器
-   */
-  private findProcessorFor(node: Element): ResourceProcessor | null {
-    for (const processor of this.processors) {
-      if (processor.match(node)) {
-        return processor;
-      }
-    }
-    return null;
-  }
-
-  /**
    * 将处理后的资源图注入回 HTML 并序列化
    */
   private serialize(
@@ -180,21 +144,6 @@ export class PageArchiver {
     };
   }
 
-  /**
-   * 执行所有预处理器
-   */
-  private async runPreprocessors(doc: Document, context: ArchivingContext): Promise<void> {
-    // 按注册顺序串行执行，因为某些预处理器可能依赖前一个的结果
-    for (const preprocessor of this.preprocessors) {
-      try {
-        await preprocessor.process(doc, context);
-      } catch (err) {
-        console.error('[PageArchiver] Preprocessor failed:', err, preprocessor.constructor.name);
-        // 这里选择继续执行，而不是中断整个流程，除非是致命错误
-      }
-    }
-  }
-
   // 批量注册收集器（策略模式）
   registerCollectProcessors(collectProcessors: CollectProcessor[]): void {
     this.collectProcessors.push(...collectProcessors);
@@ -214,12 +163,6 @@ export class PageArchiver {
       }
     });
     await Promise.all(processingPromises);
-  }
-
-  getResourceGraph() {
-    // 这里可以返回当前的资源图实例，供外部查询或调试
-    // 注意：如果需要在处理器中访问图结构，建议在 context 中传递图实例
-    return this.graph; // 目前每次调用都会返回新实例，实际项目中应保持单例或适当管理生命周期
   }
 
   /**
@@ -244,5 +187,56 @@ export class PageArchiver {
         context.cache.set(url, imgInfo.content); // 同时更新缓存，供后续处理器使用
       });
     }
+  }
+  
+  /**
+   * 执行所有预处理器
+   */
+  private async runPreprocessors(doc: Document, context: ArchivingContext): Promise<void> {
+    // 按注册顺序串行执行，因为某些预处理器可能依赖前一个的结果
+    for (const preprocessor of this.preprocessors) {
+      try {
+        await preprocessor.process(doc, context);
+      } catch (err) {
+        console.error('[PageArchiver] Preprocessor failed:', err, preprocessor.constructor.name);
+        // 这里选择继续执行，而不是中断整个流程，除非是致命错误
+      }
+    }
+  }
+  
+  // 注册文档预处理器（策略模式）
+  registerPreprocessor(preprocessor: IDocPreprocessor): void {
+    this.preprocessors.push(preprocessor);
+  }
+
+  // 批量注册预处理器
+  registerPreprocessors(preprocessors: IDocPreprocessor[]): void {
+    this.preprocessors.push(...preprocessors);
+  }
+
+  /**
+   * 注册资源处理器（策略模式）
+   */
+  registerProcessor(processor: ResourceProcessor): void {
+    this.processors.push(processor);
+  }
+
+  /**
+   * 批量注册处理器
+   */
+  registerProcessors(processors: ResourceProcessor[]): void {
+    this.processors.push(...processors);
+  }
+  
+  /**
+   * 为节点查找匹配的处理器
+   */
+  private findProcessorFor(node: Element): ResourceProcessor | null {
+    for (const processor of this.processors) {
+      if (processor.match(node)) {
+        return processor;
+      }
+    }
+    return null;
   }
 }
