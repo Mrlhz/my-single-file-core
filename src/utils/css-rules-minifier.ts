@@ -35,76 +35,86 @@ interface RemoveUnusedCssOptions {
 }
 export function removeUnusedCss(options: RemoveUnusedCssOptions): string {
   const { rawCss, domContext, doc } = options;
+
+  // 1. 获取 DOM 指纹
   const domSnapshot = domContext || getDOMSnapshot(doc);
   const usedClasses = new Set(domSnapshot.classes);
   const usedIds = new Set(domSnapshot.ids);
   const usedTags = new Set(domSnapshot.tags);
 
+  // 2. 解析 CSS
   let ast: any;
   try {
-    ast = csstree.parse(rawCss, { 
-      positions: false, 
-      parseRulePrelude: true // 关键：必须开启，否则无法遍历选择器内部
+    ast = csstree.parse(rawCss, {
+      positions: false,
+      parseRulePrelude: true, // 必须为 true，否则无法识别选择器细节
+      parseValue: false // 大幅提升 MB 级别文件的速度
     });
   } catch (e) {
-    console.error('[removeUnusedCss] CSS 解析错误:', e);
+    console.error('[removeUnusedCss] Parse Error:', e);
     return rawCss;
   }
 
+  // 3. 遍历并清理规则
   csstree.walk(ast, {
     visit: 'Rule',
     enter(node: any, item: any, list: any) {
-      // 在 Prelude (选择器列表) 中查找是否有匹配的选择器
-      let hasVisibleSelector = false;
-
-      // 遍历 SelectorList 下的每一个 Selector
       if (node.prelude && node.prelude.type === 'SelectorList') {
-        node.prelude.children.each((selectorNode: any, selectorItem: any, selectorList: any) => {
-          let isSelectorUsed = true; // 默认假设使用，除非找到证据证明没用
 
-          // 遍历单个选择器中的所有原子（Class, Id, Type）
+        // 使用 forEach，回调的第二个参数是当前节点的包装对象 (data, next, prev)
+        // 遍历选择器列表，例如 ".a, .b"
+        node.prelude.children.forEach((selectorNode: any, selectorItem: any, selectorList: any) => {
+          let isSelectorUsed = true;
+          // 检查单个选择器中的所有原子（Class, ID, Tag）
           csstree.walk(selectorNode, (subNode: any) => {
             if (subNode.type === 'ClassSelector' && !usedClasses.has(subNode.name)) {
               isSelectorUsed = false;
-            }
-            if (subNode.type === 'IdSelector' && !usedIds.has(subNode.name)) {
+            } else if (subNode.type === 'IdSelector' && !usedIds.has(subNode.name)) {
               isSelectorUsed = false;
-            }
-            if (subNode.type === 'TypeSelector' && !usedTags.has(subNode.name.toLowerCase())) {
-              // 排除通配符 *
-              if (subNode.name !== '*') {
+            } else if (subNode.type === 'TypeSelector') {
+              const tagName = subNode.name.toLowerCase();
+              if (tagName !== '*' && !usedTags.has(tagName)) {
                 isSelectorUsed = false;
               }
             }
+            // 注意：此处不处理 PseudoClass/Element，默认保留，以防误删
           });
 
+          // 关键点：直接使用 selectorList.remove(selectorItem)
+          // 这是 css-tree 官方标准的链表移除方式
           if (!isSelectorUsed) {
-            // 如果这个规则有多个选择器（.a, .b），移除不匹配的那一个
             selectorList.remove(selectorItem);
-          } else {
-            hasVisibleSelector = true;
           }
         });
-      }
 
-      // 如果 Rule 下的所有选择器都被移除了，则移除整个 Rule
-      if (!hasVisibleSelector || node?.prelude?.children?.isEmpty) {
-        list.remove(item);
+        // 如果该 Rule 下的所有选择器都被移除了，则移除整个 Rule
+        // 检查是否全被删光了
+        if (node?.prelude?.children?.isEmpty) {
+          list.remove(item);
+        }
       }
     }
   });
 
-  // 处理空的 AtRule (例如 @media 内部的规则都被删光了)
+
+  // 4. 清理空容器（如空的 @media）
   csstree.walk(ast, {
     visit: 'Atrule',
     leave(node: any, item: any, list: any) {
+      // 确保 isEmpty 后面没有括号
       if (node?.block?.children?.isEmpty) {
         list.remove(item);
       }
     }
   });
 
-  return csstree.generate(ast, { compress: true });
+  // 5. 生成结果
+  try {
+    return csstree.generate(ast, { compress: true });
+  } catch (e) {
+    console.error('[removeUnusedCss] Generate Error:', e);
+    return rawCss;
+  }
 }
 
 /**
@@ -118,7 +128,7 @@ export interface DOMSnapshot {
 export function getDOMSnapshot(doc: Document): DOMSnapshot {
   const snapshot = { classes: [], tags: [], ids: [] };
   const all = doc.querySelectorAll('*');
-    
+
   all.forEach((el: Element) => {
     snapshot.tags.push(el.tagName.toLowerCase());
     if (el.id) {
@@ -126,7 +136,7 @@ export function getDOMSnapshot(doc: Document): DOMSnapshot {
     }
     el.classList.forEach(c => snapshot.classes.push(c));
   });
-    
+
   return {
     classes: [...new Set(snapshot.classes)],
     tags: [...new Set(snapshot.tags)],
@@ -143,16 +153,16 @@ function simplifySelectorForQuery(selector: string): string {
   return selector
     // 1. 移除伪元素 (双冒号开头的，如 ::after, ::placeholder)
     .replace(/::[\w-]+(\([^\)]+\))?/gi, '')
-    
+
     // 2. 移除伪类 (单冒号开头的)
     // 需要注意排除属性选择器中的冒号（虽然很少见）以及保留 :not() 内部的内容（可选）
     // 这里采用保守策略：移除所有 : 开头直到单词边界或特殊符号的部分
     .replace(/:[\w-]+(\([^\)]+\))?/gi, '')
-    
+
     // 3. 清理多余空格
     .replace(/\s+/g, ' ')
     .trim()
-    
+
     // 4. 清理由于移除伪类/伪元素可能导致的末尾组合符残留
     // 例如 "div > :hover" 变成 "div > "，这会导致 querySelector 报错
     .replace(/\s*[>+~]\s*$/, '')
