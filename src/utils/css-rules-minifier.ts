@@ -32,6 +32,11 @@ interface RemoveUnusedCssOptions {
   rawCss: string;
   domContext?: DOMSnapshot;
   doc: Document;
+  whitelist?: {
+    classes?: (string | RegExp)[];
+    ids?: (string | RegExp)[];
+    tags?: (string | RegExp)[];
+  };
 }
 export function removeUnusedCss(options: RemoveUnusedCssOptions): string {
   const { rawCss, domContext, doc } = options;
@@ -68,13 +73,13 @@ export function removeUnusedCss(options: RemoveUnusedCssOptions): string {
           // 检查单个选择器中的所有原子（Class, ID, Tag）
           csstree.walk(selectorNode, (subNode: any) => {
             if (subNode.type === 'ClassSelector' && !usedClasses.has(subNode.name)) {
-              isSelectorUsed = false;
+              if (!isWhitelisted(subNode.name, options.whitelist?.classes)) isSelectorUsed = false;
             } else if (subNode.type === 'IdSelector' && !usedIds.has(subNode.name)) {
-              isSelectorUsed = false;
+              if (!isWhitelisted(subNode.name, options.whitelist?.ids)) isSelectorUsed = false;
             } else if (subNode.type === 'TypeSelector') {
               const tagName = subNode.name.toLowerCase();
               if (tagName !== '*' && !usedTags.has(tagName)) {
-                isSelectorUsed = false;
+                if (!isWhitelisted(tagName, options.whitelist?.tags)) isSelectorUsed = false;
               }
             }
             // 注意：此处不处理 PseudoClass/Element，默认保留，以防误删
@@ -116,6 +121,19 @@ export function removeUnusedCss(options: RemoveUnusedCssOptions): string {
     return rawCss;
   }
 }
+
+function isWhitelisted(name: string, list?: (string | RegExp)[]): boolean {
+  if (!list) return false;
+  for (const item of list) {
+    if (typeof item === 'string') {
+      if (item === name) return true;
+    } else if (item instanceof RegExp) {
+      if (item.test(name)) return true;
+    }
+  }
+  return false;
+}
+
 
 /**
  * 提取当前页面的 DOM 指纹
